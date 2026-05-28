@@ -1,0 +1,480 @@
+import { useState, useEffect } from "react";
+
+const STORAGE_KEYS = { ideas: "sb_ideas", tasks: "sb_tasks", demos: "sb_demos" };
+const TABS = ["💡 Ideas", "🔨 Build", "🚀 Demos"];
+const scores = ["🔥 High", "⚡ Medium", "❄️ Low"];
+const statuses = ["Backlog", "In Progress", "Done"];
+
+async function callClaude(prompt, systemPrompt, maxTokens) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: maxTokens || 1000,
+      system: systemPrompt,
+      messages: [{ role: "user", content: prompt }]
+    })
+  });
+  const data = await res.json();
+  const block = data.content && data.content[0];
+  return block ? block.text : "";
+}
+
+function loadStorage(key) {
+  try { return JSON.parse(localStorage.getItem(key) || "[]"); } catch { return []; }
+}
+function saveStorage(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
+
+const badgeColors = {
+  "🔥 High": "#ff6b6b", "⚡ Medium": "#ffd93d", "❄️ Low": "#6bcbff",
+  Backlog: "#888", "In Progress": "#ffd93d", Done: "#6bcb77"
+};
+function Badge({ label }) {
+  return (
+    <span style={{ background: badgeColors[label] || "#555", color: "#111", borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 700 }}>
+      {label}
+    </span>
+  );
+}
+
+function Modal({ title, onClose, children }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#1a1a2e", border: "1px solid #333", borderRadius: 16, padding: 28, width: "min(520px, 95vw)", maxHeight: "85vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+          <h3 style={{ margin: 0, color: "#e0e0ff" }}>{title}</h3>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#888", fontSize: 22, cursor: "pointer" }}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AIButton({ onClick, loading, label }) {
+  return (
+    <button onClick={onClick} disabled={loading} style={{
+      background: "linear-gradient(135deg, #7c3aed, #4f46e5)", color: "#fff", border: "none",
+      borderRadius: 8, padding: "8px 16px", cursor: loading ? "wait" : "pointer", fontSize: 13, fontWeight: 600
+    }}>
+      {loading ? "Generating..." : (label || "✨ AI Assist")}
+    </button>
+  );
+}
+
+// ── IDEAS ─────────────────────────────────────────────────────────────────────
+function Ideas({ onGoToDemo }) {
+  const [ideas, setIdeas] = useState(loadStorage(STORAGE_KEYS.ideas));
+  const [modal, setModal] = useState(false);
+  const [trendModal, setTrendModal] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [form, setForm] = useState({ name: "", problem: "", audience: "", score: "⚡ Medium", notes: "" });
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiResult, setAiResult] = useState("");
+  const [trendLoading, setTrendLoading] = useState(false);
+  const [trendIdeas, setTrendIdeas] = useState([]);
+  const [demoLoading, setDemoLoading] = useState(null);
+
+  const save = function(list) { setIdeas(list); saveStorage(STORAGE_KEYS.ideas, list); };
+  const remove = function(id) { save(ideas.filter(function(i) { return i.id !== id; })); };
+  const inp = function(f, v) { setForm(function(p) { return Object.assign({}, p, { [f]: v }); }); };
+
+  const addIdea = function() {
+    if (!form.name.trim()) return;
+    save([Object.assign({ id: Date.now() }, form), ...ideas]);
+    setForm({ name: "", problem: "", audience: "", score: "⚡ Medium", notes: "" });
+    setModal(false); setAiResult("");
+  };
+
+  const validate = async function() {
+    if (!form.name) return;
+    setAiLoading(true);
+    const txt = await callClaude(
+      'Product idea: "' + form.name + '". Problem: "' + form.problem + '". Audience: "' + form.audience + '". Give a short validation analysis: market size, pain point strength, competition, and a go/no-go verdict. Be concise (150 words max).',
+      "You are a startup product advisor. Be direct and practical.", 1000
+    );
+    setAiResult(txt); setAiLoading(false);
+  };
+
+  const fetchTrendIdeas = async function() {
+    setTrendLoading(true);
+    const txt = await callClaude(
+      "Look at the most popular AI tools and products trending on YouTube right now. Generate 6 digital product ideas specifically useful for SMALL BUSINESSES (local shops, freelancers, restaurants, salons, tradespeople, coaches, agencies) — inspired by trending AI but solving real day-to-day small business pain points. Each idea should be something a solo founder could build and sell as a SaaS or tool. Respond ONLY as a JSON array of objects with fields: name, problem, audience, score (one of: \"🔥 High\", \"⚡ Medium\", \"❄️ Low\"), trendSource. No markdown, no preamble, only JSON.",
+      "You are a startup idea generator focused on small business software. Return only valid JSON.", 1000
+    );
+    try {
+      const clean = txt.replace(/```json|```/g, "").trim();
+      setTrendIdeas(JSON.parse(clean));
+    } catch(e) { setTrendIdeas([]); }
+    setTrendLoading(false);
+  };
+
+  const importTrendIdea = function(idea) {
+    const entry = { id: Date.now() + Math.random(), name: idea.name, problem: idea.problem, audience: idea.audience, score: idea.score, notes: "Inspired by: " + idea.trendSource };
+    save([entry, ...ideas]);
+  };
+
+  const generateDemo = async function(idea) {
+    setDemoLoading(idea.id);
+    const html = await callClaude(
+      'Build a compact but realistic interactive HTML demo for this small business SaaS tool:\nName: "' + idea.name + '"\nProblem: "' + idea.problem + '"\nAudience: "' + idea.audience + '"\n\nRules:\n- Single HTML file, inline CSS and JS only, no external libraries\n- Keep it under 3000 tokens total\n- Include a header with product name + tagline\n- 2 interactive features (e.g. a form, a list, a toggle, a button that does something)\n- Use realistic dummy data for the audience\n- Clean, modern UI\n- Must be complete and valid HTML from <html> to </html>\n\nReturn ONLY the raw HTML. No markdown, no explanation, no code fences.',
+      "You are a senior frontend developer. Build polished, functional HTML prototypes using only vanilla HTML/CSS/JS. No external dependencies.", 4096
+    );
+    const demos = loadStorage(STORAGE_KEYS.demos);
+    const newDemo = { id: Date.now(), name: idea.name, audience: idea.audience, score: idea.score, html: html };
+    saveStorage(STORAGE_KEYS.demos, [newDemo, ...demos]);
+    setDemoLoading(null);
+    onGoToDemo();
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2 style={{ margin: 0, color: "#e0e0ff" }}>💡 Ideas & Validation</h2>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={function() { setTrendModal(true); setTrendIdeas([]); }} style={{ background: "linear-gradient(135deg,#7c3aed,#4f46e5)", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>🎬 Trend Ideas</button>
+          <button onClick={function() { setModal(true); }} style={{ background: "#4f46e5", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", cursor: "pointer", fontWeight: 600 }}>+ Add Idea</button>
+        </div>
+      </div>
+
+      {ideas.length === 0 && <p style={{ color: "#666", textAlign: "center", marginTop: 60 }}>No ideas yet. Add your first one!</p>}
+
+      <div style={{ display: "grid", gap: 12 }}>
+        {ideas.map(function(idea) {
+          return (
+            <div key={idea.id} onClick={function() { setSelected(idea); }}
+              style={{ background: "#12122a", border: "1px solid #2a2a4a", borderRadius: 12, padding: 18, cursor: "pointer" }}
+              onMouseEnter={function(e) { e.currentTarget.style.borderColor = "#4f46e5"; }}
+              onMouseLeave={function(e) { e.currentTarget.style.borderColor = "#2a2a4a"; }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div>
+                  <div style={{ fontWeight: 700, color: "#e0e0ff", fontSize: 16 }}>{idea.name}</div>
+                  <div style={{ color: "#888", fontSize: 13, marginTop: 4 }}>{idea.audience}</div>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <Badge label={idea.score} />
+                  <button onClick={function(e) { e.stopPropagation(); generateDemo(idea); }} disabled={demoLoading === idea.id}
+                    style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid #4f46e5", background: "#1e1b4b", color: demoLoading === idea.id ? "#666" : "#a78bfa", cursor: demoLoading === idea.id ? "wait" : "pointer", fontWeight: 600 }}>
+                    {demoLoading === idea.id ? "Building..." : "🚀 Generate Demo"}
+                  </button>
+                  <button onClick={function(e) { e.stopPropagation(); remove(idea.id); }} style={{ background: "none", border: "none", color: "#555", cursor: "pointer", fontSize: 16 }}>🗑</button>
+                </div>
+              </div>
+              {idea.problem && <p style={{ color: "#aaa", fontSize: 13, margin: "10px 0 0" }}>{idea.problem}</p>}
+            </div>
+          );
+        })}
+      </div>
+
+      {modal && (
+        <Modal title="New Product Idea" onClose={function() { setModal(false); setAiResult(""); }}>
+          {["name", "problem", "audience"].map(function(f) {
+            return (
+              <div key={f} style={{ marginBottom: 14 }}>
+                <label style={{ color: "#aaa", fontSize: 13, display: "block", marginBottom: 4 }}>
+                  {f === "name" ? "Product Name / Concept" : f === "problem" ? "Problem it solves" : "Target Audience"}
+                </label>
+                {f === "problem" ? (
+                  <textarea value={form[f]} onChange={function(e) { inp(f, e.target.value); }} rows={2}
+                    style={{ width: "100%", background: "#0d0d1f", border: "1px solid #333", borderRadius: 8, padding: 10, color: "#e0e0ff", fontSize: 14, resize: "vertical", boxSizing: "border-box" }} />
+                ) : (
+                  <input value={form[f]} onChange={function(e) { inp(f, e.target.value); }}
+                    style={{ width: "100%", background: "#0d0d1f", border: "1px solid #333", borderRadius: 8, padding: 10, color: "#e0e0ff", fontSize: 14, boxSizing: "border-box" }} />
+                )}
+              </div>
+            );
+          })}
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ color: "#aaa", fontSize: 13, display: "block", marginBottom: 4 }}>Potential Score</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              {scores.map(function(s) {
+                return (
+                  <button key={s} onClick={function() { inp("score", s); }}
+                    style={{ flex: 1, padding: "7px 0", borderRadius: 8, border: "2px solid " + (form.score === s ? "#4f46e5" : "#333"), background: form.score === s ? "#1e1b4b" : "#0d0d1f", color: "#e0e0ff", cursor: "pointer", fontSize: 13 }}>
+                    {s}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+            <AIButton onClick={validate} loading={aiLoading} label="✨ Validate with AI" />
+            <button onClick={addIdea} style={{ flex: 1, background: "#4f46e5", color: "#fff", border: "none", borderRadius: 8, padding: "8px 0", cursor: "pointer", fontWeight: 600 }}>Save Idea</button>
+          </div>
+          {aiResult && <div style={{ background: "#0d0d1f", border: "1px solid #2a2a4a", borderRadius: 10, padding: 14, color: "#ccc", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{aiResult}</div>}
+        </Modal>
+      )}
+
+      {selected && (
+        <Modal title={selected.name} onClose={function() { setSelected(null); }}>
+          <Badge label={selected.score} />
+          <p style={{ color: "#aaa", marginTop: 12 }}><strong style={{ color: "#ccc" }}>Problem:</strong> {selected.problem}</p>
+          <p style={{ color: "#aaa" }}><strong style={{ color: "#ccc" }}>Audience:</strong> {selected.audience}</p>
+          {selected.notes && <p style={{ color: "#aaa" }}><strong style={{ color: "#ccc" }}>Notes:</strong> {selected.notes}</p>}
+        </Modal>
+      )}
+
+      {trendModal && (
+        <Modal title="🎬 AI Trend Ideas from YouTube" onClose={function() { setTrendModal(false); }}>
+          <p style={{ color: "#888", fontSize: 13, marginTop: 0 }}>Generate product ideas inspired by trending AI tools for small businesses.</p>
+          {trendIdeas.length === 0 && <AIButton onClick={fetchTrendIdeas} loading={trendLoading} label="🎬 Generate Trend Ideas" />}
+          {trendLoading && <p style={{ color: "#aaa", fontSize: 13 }}>Scanning trending AI products...</p>}
+          {trendIdeas.length > 0 && (
+            <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+              {trendIdeas.map(function(idea, i) {
+                return (
+                  <div key={i} style={{ background: "#0d0d1f", border: "1px solid #2a2a4a", borderRadius: 10, padding: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                      <div style={{ fontWeight: 700, color: "#e0e0ff", fontSize: 14 }}>{idea.name}</div>
+                      <Badge label={idea.score} />
+                    </div>
+                    <div style={{ fontSize: 12, color: "#7c3aed", marginBottom: 6 }}>📺 Inspired by: {idea.trendSource}</div>
+                    <div style={{ fontSize: 13, color: "#aaa", marginBottom: 4 }}><strong style={{ color: "#ccc" }}>Problem:</strong> {idea.problem}</div>
+                    <div style={{ fontSize: 13, color: "#aaa", marginBottom: 10 }}><strong style={{ color: "#ccc" }}>Audience:</strong> {idea.audience}</div>
+                    <button onClick={function() { importTrendIdea(idea); }}
+                      style={{ fontSize: 12, padding: "5px 12px", borderRadius: 7, border: "1px solid #4f46e5", background: "#1e1b4b", color: "#a78bfa", cursor: "pointer", fontWeight: 600 }}>
+                      + Save to Ideas
+                    </button>
+                  </div>
+                );
+              })}
+              <button onClick={function() { setTrendIdeas([]); fetchTrendIdeas(); }}
+                style={{ background: "linear-gradient(135deg,#7c3aed,#4f46e5)", color: "#fff", border: "none", borderRadius: 8, padding: "9px 0", cursor: "pointer", fontWeight: 600 }}>
+                🔄 Regenerate
+              </button>
+            </div>
+          )}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ── BUILD ─────────────────────────────────────────────────────────────────────
+function Build() {
+  const [tasks, setTasks] = useState(loadStorage(STORAGE_KEYS.tasks));
+  const [modal, setModal] = useState(false);
+  const [aiTab, setAiTab] = useState(false);
+  const [form, setForm] = useState({ title: "", status: "Backlog", milestone: "MVP", notes: "" });
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiTasks, setAiTasks] = useState([]);
+
+  const save = function(list) { setTasks(list); saveStorage(STORAGE_KEYS.tasks, list); };
+  const remove = function(id) { save(tasks.filter(function(t) { return t.id !== id; })); };
+  const updateStatus = function(id, status) { save(tasks.map(function(t) { return t.id === id ? Object.assign({}, t, { status: status }) : t; })); };
+  const addTask = function() {
+    if (!form.title.trim()) return;
+    save([Object.assign({ id: Date.now() }, form), ...tasks]);
+    setForm({ title: "", status: "Backlog", milestone: "MVP", notes: "" });
+    setModal(false);
+  };
+
+  const generateTasks = async function() {
+    if (!aiPrompt.trim()) return;
+    setAiLoading(true);
+    const txt = await callClaude(
+      'Break down this product feature/goal into 5-8 concrete dev tasks: "' + aiPrompt + '". Respond ONLY with a JSON array of objects with fields: title (string), milestone (one of: MVP, Beta, Launch), status ("Backlog"). No markdown, no preamble.',
+      "You are a product manager. Return only valid JSON.", 1000
+    );
+    try {
+      const clean = txt.replace(/```json|```/g, "").trim();
+      setAiTasks(JSON.parse(clean));
+    } catch(e) { setAiTasks([]); }
+    setAiLoading(false);
+  };
+
+  const importAiTasks = function() {
+    const newTasks = aiTasks.map(function(t) { return Object.assign({}, t, { id: Date.now() + Math.random(), notes: "" }); });
+    save([...newTasks, ...tasks]); setAiTasks([]); setAiPrompt(""); setAiTab(false);
+  };
+
+  const grouped = {};
+  statuses.forEach(function(s) { grouped[s] = tasks.filter(function(t) { return t.status === s; }); });
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2 style={{ margin: 0, color: "#e0e0ff" }}>🔨 Build Tracker</h2>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={function() { setAiTab(true); }} style={{ background: "linear-gradient(135deg,#7c3aed,#4f46e5)", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>✨ AI Tasks</button>
+          <button onClick={function() { setModal(true); }} style={{ background: "#4f46e5", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", cursor: "pointer", fontWeight: 600 }}>+ Add Task</button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+        {statuses.map(function(s) {
+          return (
+            <div key={s} style={{ background: "#12122a", borderRadius: 12, padding: 14, minHeight: 200 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <span style={{ fontWeight: 700, color: "#e0e0ff" }}>{s}</span>
+                <Badge label={s} />
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {grouped[s].map(function(task) {
+                  return (
+                    <div key={task.id} style={{ background: "#0d0d1f", border: "1px solid #2a2a4a", borderRadius: 8, padding: 10 }}>
+                      <div style={{ fontSize: 13, color: "#e0e0ff", fontWeight: 600, marginBottom: 6 }}>{task.title}</div>
+                      <div style={{ fontSize: 11, color: "#666", marginBottom: 8 }}>{task.milestone}</div>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                        {statuses.filter(function(st) { return st !== s; }).map(function(st) {
+                          return (
+                            <button key={st} onClick={function() { updateStatus(task.id, st); }}
+                              style={{ fontSize: 10, padding: "3px 7px", borderRadius: 5, border: "1px solid #333", background: "#1a1a2e", color: "#aaa", cursor: "pointer" }}>
+                              → {st}
+                            </button>
+                          );
+                        })}
+                        <button onClick={function() { remove(task.id); }} style={{ fontSize: 10, padding: "3px 7px", borderRadius: 5, border: "none", background: "none", color: "#555", cursor: "pointer" }}>🗑</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {modal && (
+        <Modal title="New Task" onClose={function() { setModal(false); }}>
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ color: "#aaa", fontSize: 13, display: "block", marginBottom: 4 }}>Task Title</label>
+            <input value={form.title} onChange={function(e) { setForm(function(p) { return Object.assign({}, p, { title: e.target.value }); }); }}
+              style={{ width: "100%", background: "#0d0d1f", border: "1px solid #333", borderRadius: 8, padding: 10, color: "#e0e0ff", fontSize: 14, boxSizing: "border-box" }} />
+          </div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ color: "#aaa", fontSize: 13, display: "block", marginBottom: 4 }}>Milestone</label>
+              <select value={form.milestone} onChange={function(e) { setForm(function(p) { return Object.assign({}, p, { milestone: e.target.value }); }); }}
+                style={{ width: "100%", background: "#0d0d1f", border: "1px solid #333", borderRadius: 8, padding: 10, color: "#e0e0ff" }}>
+                {["MVP", "Beta", "Launch"].map(function(m) { return <option key={m}>{m}</option>; })}
+              </select>
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={{ color: "#aaa", fontSize: 13, display: "block", marginBottom: 4 }}>Status</label>
+              <select value={form.status} onChange={function(e) { setForm(function(p) { return Object.assign({}, p, { status: e.target.value }); }); }}
+                style={{ width: "100%", background: "#0d0d1f", border: "1px solid #333", borderRadius: 8, padding: 10, color: "#e0e0ff" }}>
+                {statuses.map(function(s) { return <option key={s}>{s}</option>; })}
+              </select>
+            </div>
+          </div>
+          <button onClick={addTask} style={{ width: "100%", background: "#4f46e5", color: "#fff", border: "none", borderRadius: 8, padding: "10px 0", cursor: "pointer", fontWeight: 600 }}>Save Task</button>
+        </Modal>
+      )}
+
+      {aiTab && (
+        <Modal title="✨ AI Task Generator" onClose={function() { setAiTab(false); setAiTasks([]); }}>
+          <label style={{ color: "#aaa", fontSize: 13, display: "block", marginBottom: 6 }}>Describe your feature or goal</label>
+          <textarea value={aiPrompt} onChange={function(e) { setAiPrompt(e.target.value); }} rows={3}
+            placeholder='e.g. "User authentication with Google OAuth"'
+            style={{ width: "100%", background: "#0d0d1f", border: "1px solid #333", borderRadius: 8, padding: 10, color: "#e0e0ff", fontSize: 14, resize: "vertical", boxSizing: "border-box", marginBottom: 12 }} />
+          <AIButton onClick={generateTasks} loading={aiLoading} label="✨ Generate Tasks" />
+          {aiTasks.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              {aiTasks.map(function(t, i) {
+                return (
+                  <div key={i} style={{ background: "#0d0d1f", border: "1px solid #2a2a4a", borderRadius: 8, padding: 10, marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ color: "#e0e0ff", fontSize: 13 }}>{t.title}</span>
+                    <Badge label={t.milestone} />
+                  </div>
+                );
+              })}
+              <button onClick={importAiTasks} style={{ width: "100%", marginTop: 8, background: "#4f46e5", color: "#fff", border: "none", borderRadius: 8, padding: "10px 0", cursor: "pointer", fontWeight: 600 }}>Import All Tasks</button>
+            </div>
+          )}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ── DEMOS ─────────────────────────────────────────────────────────────────────
+function Demos() {
+  const [demos, setDemos] = useState(loadStorage(STORAGE_KEYS.demos));
+  const [selected, setSelected] = useState(null);
+
+  useEffect(function() {
+    const interval = setInterval(function() {
+      const fresh = loadStorage(STORAGE_KEYS.demos);
+      if (fresh.length !== demos.length) { setDemos(fresh); }
+    }, 1500);
+    return function() { clearInterval(interval); };
+  }, [demos.length]);
+
+  const remove = function(id) {
+    const updated = demos.filter(function(d) { return d.id !== id; });
+    setDemos(updated); saveStorage(STORAGE_KEYS.demos, updated);
+    if (selected && selected.id === id) setSelected(null);
+  };
+
+  return (
+    <div>
+      <div style={{ marginBottom: 20 }}>
+        <h2 style={{ margin: 0, color: "#e0e0ff" }}>🚀 Demos</h2>
+        <p style={{ color: "#666", fontSize: 13, marginTop: 4 }}>Click "🚀 Generate Demo" on any idea to build a live prototype here.</p>
+      </div>
+      {demos.length === 0 && <p style={{ color: "#555", textAlign: "center", marginTop: 80 }}>No demos yet — go to 💡 Ideas and hit "🚀 Generate Demo" on any idea.</p>}
+      <div style={{ display: "grid", gridTemplateColumns: selected ? "260px 1fr" : "1fr", gap: 16 }}>
+        <div style={{ display: "grid", gap: 10, alignContent: "start" }}>
+          {demos.map(function(d) {
+            const isActive = selected && selected.id === d.id;
+            return (
+              <div key={d.id} onClick={function() { setSelected(d); }}
+                style={{ background: isActive ? "#1e1b4b" : "#12122a", border: "1px solid " + (isActive ? "#4f46e5" : "#2a2a4a"), borderRadius: 12, padding: 16, cursor: "pointer" }}>
+                <div style={{ fontWeight: 700, color: "#e0e0ff", fontSize: 14, marginBottom: 4 }}>{d.name}</div>
+                <div style={{ fontSize: 12, color: "#666", marginBottom: 10 }}>{d.audience}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <Badge label={d.score} />
+                  <button onClick={function(e) { e.stopPropagation(); remove(d.id); }} style={{ background: "none", border: "none", color: "#555", cursor: "pointer" }}>🗑</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {selected && (
+          <div style={{ background: "#12122a", border: "1px solid #2a2a4a", borderRadius: 12, overflow: "hidden" }}>
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a4a", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontWeight: 700, color: "#e0e0ff" }}>{selected.name} — Live Demo</span>
+              <button onClick={function() { setSelected(null); }} style={{ background: "none", border: "none", color: "#888", fontSize: 20, cursor: "pointer" }}>×</button>
+            </div>
+            <iframe srcDoc={selected.html} style={{ width: "100%", height: 520, border: "none", background: "#fff" }} title="demo" sandbox="allow-scripts" />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── APP SHELL ─────────────────────────────────────────────────────────────────
+export default function App() {
+  const [tab, setTab] = useState(0);
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0a0a1a", fontFamily: "'Inter', sans-serif", color: "#e0e0ff" }}>
+      <div style={{ background: "#0d0d1f", borderBottom: "1px solid #1e1e3a", padding: "14px 24px", display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ fontSize: 22 }}>🧠</div>
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 18, background: "linear-gradient(135deg,#a78bfa,#818cf8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>Second Brain</div>
+          <div style={{ fontSize: 11, color: "#666", marginTop: -2 }}>Digital Product Builder</div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 0, padding: "0 24px", background: "#0d0d1f", borderBottom: "1px solid #1e1e3a" }}>
+        {TABS.map(function(t, i) {
+          return (
+            <button key={t} onClick={function() { setTab(i); }} style={{
+              background: "none", border: "none", borderBottom: "3px solid " + (tab === i ? "#4f46e5" : "transparent"),
+              color: tab === i ? "#a78bfa" : "#666", padding: "14px 20px", cursor: "pointer", fontWeight: tab === i ? 700 : 400, fontSize: 14
+            }}>{t}</button>
+          );
+        })}
+      </div>
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "28px 20px" }}>
+        {tab === 0 && <Ideas onGoToDemo={function() { setTab(2); }} />}
+        {tab === 1 && <Build />}
+        {tab === 2 && <Demos />}
+      </div>
+    </div>
+  );
+}
